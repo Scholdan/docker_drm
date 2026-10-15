@@ -15,7 +15,9 @@ localhost binding restriction.
 
 # Running the image
 
-A place to store all the firmware images is required. To make the app
+A place to store all the firmware images is required. DRM runs as uid 500
+inside the container, so the host directory must be owned by that uid
+(`chown 500:500 <local disk path>`) or DRM refuses to start. To make the app
 available to all, redirect port 8090 to the socat port:
 
     docker run --name drm -d --tmpfs /tmp -v <local disk path>:/var/dell/drm/ \
