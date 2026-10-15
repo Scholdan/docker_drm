@@ -7,7 +7,11 @@ name: Update DRM
 
 on:
   schedule:
-    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+    # GitHub cron runs in UTC only. Schedule both DST-candidate hours and let the
+    # job gate on Copenhagen local time, so it fires once at 06:00 Europe/Copenhagen
+    # every Monday year-round.
+    - cron: '0 4 * * 1'   # 06:00 Copenhagen during CEST (summer, UTC+2)
+    - cron: '0 5 * * 1'   # 06:00 Copenhagen during CET  (winter, UTC+1)
   workflow_dispatch:
 
 permissions:
@@ -24,6 +28,14 @@ jobs:
         id: check
         run: |
           set -euo pipefail
+
+          # Both cron entries fire; only the one matching 06:00 Copenhagen proceeds.
+          # Manual (workflow_dispatch) runs are never gated.
+          if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ] && [ "$(TZ=Europe/Copenhagen date +%H)" != "06" ]; then
+            echo "Scheduled run outside 06:00 Copenhagen; skipping."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
 
           curl -fsSL -A drm https://downloads.dell.com/catalog/DRMVersion_A00.tar.gz -o /tmp/m.tar.gz
           tar -xzf /tmp/m.tar.gz -C /tmp DRMVersion.json
