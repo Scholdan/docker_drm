@@ -1,0 +1,90 @@
+name: Update DRM
+
+# Dell's public download page lags behind, but DRM ships a version manifest
+# (catalog/DRMVersion_A00.tar.gz) that carries the newest version, its installer
+# URL and SHA-256. The download URL's FOLDER id changes per release and cannot be
+# derived from the version, so we read it straight from that manifest.
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Dell manifest and patch files
+        id: check
+        run: |
+          set -euo pipefail
+
+          curl -fsSL -A drm https://downloads.dell.com/catalog/DRMVersion_A00.tar.gz -o /tmp/m.tar.gz
+          tar -xzf /tmp/m.tar.gz -C /tmp DRMVersion.json
+
+          NEW_VER=$(jq -r '.AppUpdateInfo.Version'        /tmp/DRMVersion.json)
+          NEW_URL=$(jq -r '.AppUpdateInfo.LinuxInstaller' /tmp/DRMVersion.json)
+          NEW_SHA=$(jq -r '.AppUpdateInfo.LinuxDigest'    /tmp/DRMVersion.json)
+
+          CUR_URL=$(grep -oE 'https://downloads.dell.com/[^ ]+DRMInstaller_[0-9.]+\.bin' Dockerfile)
+          OLD_VER=$(grep -oE 'dell-drm:[0-9.]+' run.sh | head -1 | cut -d: -f2)
+
+          if [ "$NEW_URL" = "$CUR_URL" ]; then
+            echo "DRM already current ($NEW_VER); nothing to do."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Updating DRM $OLD_VER -> $NEW_VER"
+          OLD_ESC=$(printf '%s' "$OLD_VER" | sed 's/[.]/\\./g')
+
+          # Dockerfile: installer URL + published checksum
+          sed -i "s#${CUR_URL}#${NEW_URL}#" Dockerfile
+          sed -i -E "s/[0-9a-f]{64}(  drm\.bin)/${NEW_SHA}\1/" Dockerfile
+          # Makefile + run.sh: image tag (short x.y.z version)
+          sed -i -E "s/:${OLD_ESC}([^0-9.]|$)/:${NEW_VER}\1/g" Makefile run.sh
+
+          {
+            echo "changed=true"
+            echo "new_ver=${NEW_VER}"
+            echo "old_ver=${OLD_VER}"
+            echo "branch=drm-update/${NEW_VER}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+          NEW_VER: ${{ steps.check.outputs.new_ver }}
+          OLD_VER: ${{ steps.check.outputs.old_ver }}
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "Branch $BRANCH already exists; a PR is already open. Skipping."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git commit -am "Upgrade DRM ${OLD_VER} -> ${NEW_VER}"
+          git push -u origin "$BRANCH"
+
+          gh pr create \
+            --base master \
+            --head "$BRANCH" \
+            --title "Upgrade DRM ${OLD_VER} -> ${NEW_VER}" \
+            --body "Automated update from Dell's version manifest (\`catalog/DRMVersion_A00.tar.gz\`).
+
+          - Installer URL and SHA-256 updated in \`Dockerfile\`
+          - Image tag updated in \`Makefile\` and \`run.sh\`
+
+          Build before merging to confirm the installer and checksum: \`make drm\`."
